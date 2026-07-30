@@ -76,6 +76,13 @@ private:
   std::string cloud_topic_;
   std::string custom_topic_;
   std::string imu_topic_;
+
+  // Soft time sync: align LiDAR PTP time to system clock on first frame
+  bool time_sync_soft_{false};
+  bool first_frame_received_{false};
+  int time_sync_wait_count_{50};
+  int frame_count_{0};
+  int64_t time_offset_ns_{0};
 };
 
 #endif  // LIVOX_VULCAN_DRIVER2__LIVOX_VULCAN_NODE_HPP_

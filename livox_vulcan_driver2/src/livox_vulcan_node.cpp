@@ -135,10 +135,31 @@ void LivoxVulcanNode::publish_accumulated_cloud()
   size_t num_points = accumulated_points_.size();
   uint64_t timebase_ns = accumulated_points_[0].offset_time_ns;
 
+  // Soft time sync: wait for N frames to stabilize, then compute offset
+  if (time_sync_soft_ && !first_frame_received_) {
+    frame_count_++;
+    if (frame_count_ >= time_sync_wait_count_) {
+      int64_t sys_ns = rclcpp::Clock(RCL_SYSTEM_TIME).now().nanoseconds();
+      time_offset_ns_ = sys_ns - static_cast<int64_t>(timebase_ns);
+      first_frame_received_ = true;
+      RCLCPP_INFO(this->get_logger(),
+        "Soft time sync (after %d frames): system=%ld ns  lidar=%lu ns  "
+        "offset=%ld ns (%.3f ms)",
+        frame_count_, sys_ns, timebase_ns, time_offset_ns_,
+        time_offset_ns_ / 1e6);
+    }
+  }
+
+  // Apply offset if soft sync is active
+  uint64_t stamp_ns = timebase_ns;
+  if (time_sync_soft_ && first_frame_received_) {
+    stamp_ns = static_cast<uint64_t>(static_cast<int64_t>(timebase_ns) + time_offset_ns_);
+  }
+
   // --- Publish PointCloud2 ---
   {
     auto msg = std::make_unique<sensor_msgs::msg::PointCloud2>();
-    msg->header.stamp = rclcpp::Time(timebase_ns);
+    msg->header.stamp = rclcpp::Time(stamp_ns);
     msg->header.frame_id = "livox_frame";
 
     const uint32_t POINT_STEP = 16;
@@ -177,9 +198,9 @@ void LivoxVulcanNode::publish_accumulated_cloud()
   // --- Publish CustomMsg (same timestamp scheme as livox_ros_driver2) ---
   {
     auto msg = std::make_unique<CustomMsg>();
-    msg->header.stamp = rclcpp::Time(timebase_ns);
+    msg->header.stamp = rclcpp::Time(stamp_ns);
     msg->header.frame_id = "livox_frame";
-    msg->timebase = timebase_ns;
+    msg->timebase = stamp_ns;
     msg->point_num = num_points;
     msg->lidar_id = static_cast<uint8_t>(lidar_handle_ & 0xFF);
     msg->rsvd.fill(0);
@@ -267,6 +288,16 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   custom_topic_ = this->get_parameter("custom_topic").as_string();
   imu_topic_    = this->get_parameter("imu_topic").as_string();
 
+  if (!this->has_parameter("time_sync_soft")) {
+    this->declare_parameter<bool>("time_sync_soft", false);
+  }
+  time_sync_soft_ = this->get_parameter("time_sync_soft").as_bool();
+
+  if (!this->has_parameter("time_sync_wait_count")) {
+    this->declare_parameter<int>("time_sync_wait_count", 50);
+  }
+  time_sync_wait_count_ = this->get_parameter("time_sync_wait_count").as_int();
+
   if (config_path_.empty()) {
     RCLCPP_ERROR(this->get_logger(), "No config_path provided; Livox SDK cannot initialize.");
     return;
@@ -317,6 +348,7 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
     RCLCPP_INFO(this->get_logger(), "  Host IP     : %s", host_ip.c_str());
   }
 
+  RCLCPP_INFO(this->get_logger(), "  Soft sync   : %s", time_sync_soft_ ? "ON" : "OFF");
   RCLCPP_INFO(this->get_logger(), "  Cloud topic : %s  [sensor_msgs::PointCloud2]", cloud_topic_.c_str());
   RCLCPP_INFO(this->get_logger(), "  Custom topic: %s  [livox_ros_msg::CustomMsg]", custom_topic_.c_str());
   RCLCPP_INFO(this->get_logger(), "  IMU topic   : %s  [sensor_msgs::Imu]", imu_topic_.c_str());

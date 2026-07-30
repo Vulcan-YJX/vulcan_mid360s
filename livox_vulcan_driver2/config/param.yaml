@@ -5,3 +5,5 @@
       cloud_topic: "livox/pointcloud"
       custom_topic: "livox/custom_msg"
       imu_topic: "livox/imu"
+      time_sync_soft: true
+      time_sync_wait_count: 10
