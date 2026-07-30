@@ -1,0 +1,7 @@
+/**:
+  livox_vulcan_node:
+    ros__parameters:
+      config_path: ""
+      cloud_topic: "livox/pointcloud"
+      custom_topic: "livox/custom_msg"
+      imu_topic: "livox/imu"

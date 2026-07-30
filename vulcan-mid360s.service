@@ -1,0 +1,19 @@
+[Unit]
+Description=Auto Cube ROS2 lidar service.
+Requires=autocube-config.service network-online.target
+After=autocube-config.service network-online.target
+Wants=network-online.target
+PartOf=autocube-config.service
+
+[Service]
+EnvironmentFile=/opt/autocube/autocube_env.conf
+WorkingDirectory=/opt/autocube
+ExecStart=/usr/bin/bash -c "source /opt/ros/humble/setup.bash && source /opt/autocube/vulcan-mid360s/setup.bash && ros2 launch livox_vulcan_driver2 livox_mid360s.launch.py"
+User=ddtcube
+Group=ddtcube
+Restart=always
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+

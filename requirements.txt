@@ -1,0 +1,3 @@
+ros-humble-ros-base,livox-sdk2,autocube-config,libpcl-dev
+0.0.1
+    init prj
