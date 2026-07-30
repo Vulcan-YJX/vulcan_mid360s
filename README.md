@@ -7,7 +7,7 @@ Livox Mid-360s LiDAR ROS2 Humble 驱动，基于 Livox SDK2。
 | 依赖 | 说明 |
 |------|------|
 | ROS2 Humble | rclcpp, sensor_msgs |
-| [livox_ros_msg](../livox_ros_msg/) | 自定义消息 CustomMsg / CustomPoint |
+| [livox_ros_msg](./livox_ros_msg/) | 自定义消息 CustomMsg / CustomPoint |
 | Livox SDK2 | `liblivox_lidar_sdk_shared.so`，系统安装于 `/usr/local/lib` |
 
 ## 构建
