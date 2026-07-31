@@ -1,0 +1,13 @@
+/**:
+  livox_tools_node:
+    ros__parameters:
+      cloud_topic: "/livox/pointcloud"
+      imu_topic: "/livox/imu"
+      trans_point_topic: "/livox/pointcloud/transform"
+      laserscan_topic: "/autocube/laserscan"
+      base_link: "autocube_link"
+      min_z: -0.1
+      max_z: 0.5
+      enable_log: False
+      range_min: 0.3
+      range_max: 10.0

@@ -26,6 +26,7 @@
 #include "sensor_msgs/msg/point_field.hpp"
 #include "livox_ros_msg/msg/custom_msg.hpp"
 #include "livox_ros_msg/msg/custom_point.hpp"
+#include "Fusion/Fusion.h"
 
 // Accumulated point with its absolute timestamp
 struct PointWithTime {
@@ -83,6 +84,11 @@ private:
   int time_sync_wait_count_{50};
   int frame_count_{0};
   int64_t time_offset_ns_{0};
+
+  // AHRS orientation estimation
+  FusionAhrs ahrs_;
+  rclcpp::Time last_imu_stamp_;
+  bool imu_initialised_{false};
 };
 
 #endif  // LIVOX_VULCAN_DRIVER2__LIVOX_VULCAN_NODE_HPP_

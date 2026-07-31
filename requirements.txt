@@ -1,3 +1,5 @@
 ros-humble-ros-base,livox-sdk2,autocube-config,libpcl-dev
+0.0.2
+    add livox tools.
 0.0.1
     init prj

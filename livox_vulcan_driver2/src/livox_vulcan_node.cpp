@@ -162,7 +162,8 @@ void LivoxVulcanNode::publish_accumulated_cloud()
     msg->header.stamp = rclcpp::Time(stamp_ns);
     msg->header.frame_id = "livox_frame";
 
-    const uint32_t POINT_STEP = 16;
+    // PCL-compatible: float x/y/z (meters) + float intensity
+    const uint32_t POINT_STEP = 16;  // 4 floats = 16 bytes
     msg->height = 1;
     msg->width = num_points;
     msg->is_bigendian = false;
@@ -171,26 +172,27 @@ void LivoxVulcanNode::publish_accumulated_cloud()
     msg->is_dense = true;
 
     sensor_msgs::msg::PointField f;
-    f.name = "x";         f.offset = 0;  f.datatype = sensor_msgs::msg::PointField::INT32;  f.count = 1;
+    f.name = "x";         f.offset = 0;  f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
     msg->fields.push_back(f);
-    f.name = "y";         f.offset = 4;  f.datatype = sensor_msgs::msg::PointField::INT32;  f.count = 1;
+    f.name = "y";         f.offset = 4;  f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
     msg->fields.push_back(f);
-    f.name = "z";         f.offset = 8;  f.datatype = sensor_msgs::msg::PointField::INT32;  f.count = 1;
+    f.name = "z";         f.offset = 8;  f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
     msg->fields.push_back(f);
-    f.name = "reflectivity"; f.offset = 12; f.datatype = sensor_msgs::msg::PointField::UINT8; f.count = 1;
-    msg->fields.push_back(f);
-    f.name = "tag";       f.offset = 13; f.datatype = sensor_msgs::msg::PointField::UINT8; f.count = 1;
+    f.name = "intensity"; f.offset = 12; f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
     msg->fields.push_back(f);
 
     msg->data.resize(num_points * POINT_STEP);
     for (size_t i = 0; i < num_points; ++i) {
       auto & pt = accumulated_points_[i].point;
       uint8_t * dst = &msg->data[i * POINT_STEP];
-      memcpy(dst + 0,  &pt.x, 4);
-      memcpy(dst + 4,  &pt.y, 4);
-      memcpy(dst + 8,  &pt.z, 4);
-      dst[12] = pt.reflectivity;
-      dst[13] = pt.tag;
+      float fx = pt.x * 1e-3f;
+      float fy = pt.y * 1e-3f;
+      float fz = pt.z * 1e-3f;
+      float fi = static_cast<float>(pt.reflectivity);
+      memcpy(dst + 0,  &fx, 4);
+      memcpy(dst + 4,  &fy, 4);
+      memcpy(dst + 8,  &fz, 4);
+      memcpy(dst + 12, &fi, 4);
     }
     cloud_pub_->publish(std::move(msg));
   }
@@ -257,6 +259,48 @@ void LivoxVulcanNode::publish_imu_packet(LivoxLidarEthernetPacket * data)
   msg->linear_acceleration.y = acc_y * inv;
   msg->linear_acceleration.z = acc_z * inv;
 
+  // --- AHRS orientation estimation ---
+  {
+    rclcpp::Time stamp = msg->header.stamp;
+    if (!imu_initialised_) {
+      last_imu_stamp_ = stamp;
+      imu_initialised_ = true;
+    } else {
+      float dt = (stamp - last_imu_stamp_).seconds();
+      last_imu_stamp_ = stamp;
+
+      if (dt > 0.0f && dt <= 0.2f) {
+        constexpr float RAD2DEG = 57.2957795f;
+        constexpr float MS2_TO_G = 1.0f / 9.80665f;
+
+        FusionVector gyro = {
+          static_cast<float>(msg->angular_velocity.x) * RAD2DEG,
+          static_cast<float>(msg->angular_velocity.y) * RAD2DEG,
+          static_cast<float>(msg->angular_velocity.z) * RAD2DEG
+        };
+        FusionVector accel = {
+          static_cast<float>(msg->linear_acceleration.x) * MS2_TO_G,
+          static_cast<float>(msg->linear_acceleration.y) * MS2_TO_G,
+          static_cast<float>(msg->linear_acceleration.z) * MS2_TO_G
+        };
+        float norm = sqrtf(accel.axis.x * accel.axis.x +
+                           accel.axis.y * accel.axis.y +
+                           accel.axis.z * accel.axis.z);
+        if (norm > 0.0f) {
+          accel.axis.x /= norm;
+          accel.axis.y /= norm;
+          accel.axis.z /= norm;
+        }
+        FusionAhrsUpdateNoMagnetometer(&ahrs_, gyro, accel, dt);
+        const FusionQuaternion quat = FusionAhrsGetQuaternion(&ahrs_);
+        msg->orientation.w = quat.element.w;
+        msg->orientation.x = quat.element.x;
+        msg->orientation.y = quat.element.y;
+        msg->orientation.z = quat.element.z;
+      }
+    }
+  }
+
   msg->orientation_covariance[0] = -1;
   msg->angular_velocity_covariance[0] = -1;
   msg->linear_acceleration_covariance[0] = -1;
@@ -297,6 +341,8 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
     this->declare_parameter<int>("time_sync_wait_count", 50);
   }
   time_sync_wait_count_ = this->get_parameter("time_sync_wait_count").as_int();
+
+  FusionAhrsInitialise(&ahrs_);
 
   if (config_path_.empty()) {
     RCLCPP_ERROR(this->get_logger(), "No config_path provided; Livox SDK cannot initialize.");
