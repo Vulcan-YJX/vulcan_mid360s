@@ -235,7 +235,11 @@ void LivoxVulcanNode::publish_imu_packet(LivoxLidarEthernetPacket * data)
   auto msg = std::make_unique<sensor_msgs::msg::Imu>();
 
   uint64_t ts_raw = GetPacketTimestamp(data);
-  msg->header.stamp = rclcpp::Time(ts_raw);
+  uint64_t stamp_ns = ts_raw;
+  if (time_sync_soft_ && first_frame_received_) {
+    stamp_ns = static_cast<uint64_t>(static_cast<int64_t>(ts_raw) + time_offset_ns_);
+  }
+  msg->header.stamp = rclcpp::Time(stamp_ns);
   msg->header.frame_id = "livox_imu";
 
   LivoxLidarImuRawPoint * imu_pts =

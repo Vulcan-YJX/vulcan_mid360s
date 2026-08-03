@@ -1,8 +1,7 @@
 [Unit]
 Description=Auto Cube ROS2 lidar service.
-Requires=autocube-config.service network-online.target
-After=autocube-config.service network-online.target
-Wants=network-online.target
+Requires=autocube-config.service
+After=autocube-config.service
 PartOf=autocube-config.service
 
 [Service]
