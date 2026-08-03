@@ -13,9 +13,14 @@
 #ifndef LIVOX_VULCAN_DRIVER2__LIVOX_VULCAN_NODE_HPP_
 #define LIVOX_VULCAN_DRIVER2__LIVOX_VULCAN_NODE_HPP_
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "livox_lidar_api.h"
@@ -32,6 +37,14 @@
 struct PointWithTime {
   LivoxLidarCartesianHighRawPoint point;
   uint64_t offset_time_ns;  // absolute point timestamp in ns, same scheme as livox_ros_driver2
+};
+
+// One immutable 10 Hz frame shared by the two publisher threads.
+struct PointCloudFrame {
+  std::vector<PointWithTime> points;
+  uint64_t timebase_ns{0};
+  uint64_t stamp_ns{0};
+  uint32_t lidar_handle{0};
 };
 
 class LivoxVulcanNode : public rclcpp::Node
@@ -52,8 +65,13 @@ private:
                            LivoxLidarAsyncControlResponse * response, void * client_data);
 
   // --- ROS publishers ---
-  void publish_accumulated_cloud();
-  void publish_custom_msg();
+  void dispatch_accumulated_frame();
+  void pointcloud_publisher_loop();
+  void custom_publisher_loop();
+  void publish_pointcloud_frame(const PointCloudFrame & frame);
+  void publish_custom_frame(const PointCloudFrame & frame);
+  void start_publisher_threads();
+  void stop_publisher_threads();
   void publish_imu_packet(LivoxLidarEthernetPacket * data);
 
   // --- Timestamp helpers (same scheme as livox_ros_driver2) ---
@@ -69,8 +87,21 @@ private:
   std::chrono::nanoseconds last_timestamp_ns_{0};
   uint32_t lidar_handle_{0};
 
-  // Timer for periodic point cloud publishing (10 Hz)
-  rclcpp::TimerBase::SharedPtr cloud_timer_;
+  // The timer only cuts a frame and feeds two independent publisher queues.
+  rclcpp::TimerBase::SharedPtr frame_timer_;
+  static constexpr size_t kMaxPublisherQueueSize = 4;
+
+  std::atomic<bool> publisher_threads_running_{false};
+  std::thread pointcloud_publisher_thread_;
+  std::thread custom_publisher_thread_;
+
+  std::mutex pointcloud_queue_mutex_;
+  std::condition_variable pointcloud_queue_cv_;
+  std::deque<std::shared_ptr<const PointCloudFrame>> pointcloud_queue_;
+
+  std::mutex custom_queue_mutex_;
+  std::condition_variable custom_queue_cv_;
+  std::deque<std::shared_ptr<const PointCloudFrame>> custom_queue_;
 
   // Config
   std::string config_path_;
@@ -80,10 +111,10 @@ private:
 
   // Soft time sync: align LiDAR PTP time to system clock on first frame
   bool time_sync_soft_{false};
-  bool first_frame_received_{false};
+  std::atomic<bool> first_frame_received_{false};
   int time_sync_wait_count_{50};
   int frame_count_{0};
-  int64_t time_offset_ns_{0};
+  std::atomic<int64_t> time_offset_ns_{0};
 
   // AHRS orientation estimation
   FusionAhrs ahrs_;

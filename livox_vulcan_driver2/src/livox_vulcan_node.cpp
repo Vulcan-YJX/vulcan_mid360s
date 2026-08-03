@@ -122,109 +122,218 @@ void LivoxVulcanNode::OnWorkModeCb(livox_status status, uint32_t handle,
 }
 
 // ---------------------------------------------------------------------------
-// Timer callback: publish PointCloud2 + CustomMsg at 10 Hz
+// Timer callback: cut one frame and hand it to two independent workers.
+// No point conversion or ROS publishing is done while holding cloud_mutex_.
 // ---------------------------------------------------------------------------
-void LivoxVulcanNode::publish_accumulated_cloud()
+void LivoxVulcanNode::dispatch_accumulated_frame()
 {
-  std::lock_guard<std::mutex> lock(cloud_mutex_);
-
-  if (accumulated_points_.empty()) {
-    return;
+  auto frame = std::make_shared<PointCloudFrame>();
+  {
+    std::lock_guard<std::mutex> lock(cloud_mutex_);
+    if (accumulated_points_.empty()) {
+      return;
+    }
+    frame->points.swap(accumulated_points_);
+    frame->lidar_handle = lidar_handle_;
   }
 
-  size_t num_points = accumulated_points_.size();
-  uint64_t timebase_ns = accumulated_points_[0].offset_time_ns;
+  frame->timebase_ns = frame->points.front().offset_time_ns;
 
   // Soft time sync: wait for N frames to stabilize, then compute offset
-  if (time_sync_soft_ && !first_frame_received_) {
+  if (time_sync_soft_ && !first_frame_received_.load(std::memory_order_acquire)) {
     frame_count_++;
     if (frame_count_ >= time_sync_wait_count_) {
       int64_t sys_ns = rclcpp::Clock(RCL_SYSTEM_TIME).now().nanoseconds();
-      time_offset_ns_ = sys_ns - static_cast<int64_t>(timebase_ns);
-      first_frame_received_ = true;
+      int64_t offset_ns = sys_ns - static_cast<int64_t>(frame->timebase_ns);
+      time_offset_ns_.store(offset_ns, std::memory_order_relaxed);
+      first_frame_received_.store(true, std::memory_order_release);
       RCLCPP_INFO(this->get_logger(),
         "Soft time sync (after %d frames): system=%ld ns  lidar=%lu ns  "
         "offset=%ld ns (%.3f ms)",
-        frame_count_, sys_ns, timebase_ns, time_offset_ns_,
-        time_offset_ns_ / 1e6);
+        frame_count_, sys_ns, frame->timebase_ns, offset_ns,
+        offset_ns / 1e6);
     }
   }
 
   // Apply offset if soft sync is active
-  uint64_t stamp_ns = timebase_ns;
-  if (time_sync_soft_ && first_frame_received_) {
-    stamp_ns = static_cast<uint64_t>(static_cast<int64_t>(timebase_ns) + time_offset_ns_);
+  frame->stamp_ns = frame->timebase_ns;
+  if (time_sync_soft_ && first_frame_received_.load(std::memory_order_acquire)) {
+    frame->stamp_ns = static_cast<uint64_t>(
+      static_cast<int64_t>(frame->timebase_ns) +
+      time_offset_ns_.load(std::memory_order_relaxed));
   }
 
-  // --- Publish PointCloud2 ---
+  // Feed the latency-sensitive CustomMsg queue first. Each queue has its own
+  // lock and capacity, so a slow PointCloud2 worker can only drop its own old
+  // frames and can never delay the CustomMsg worker.
   {
-    auto msg = std::make_unique<sensor_msgs::msg::PointCloud2>();
-    msg->header.stamp = rclcpp::Time(stamp_ns);
-    msg->header.frame_id = "livox_frame";
-
-    // PCL-compatible: float x/y/z (meters) + float intensity
-    const uint32_t POINT_STEP = 16;  // 4 floats = 16 bytes
-    msg->height = 1;
-    msg->width = num_points;
-    msg->is_bigendian = false;
-    msg->point_step = POINT_STEP;
-    msg->row_step = msg->width * msg->point_step;
-    msg->is_dense = true;
-
-    sensor_msgs::msg::PointField f;
-    f.name = "x";         f.offset = 0;  f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
-    msg->fields.push_back(f);
-    f.name = "y";         f.offset = 4;  f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
-    msg->fields.push_back(f);
-    f.name = "z";         f.offset = 8;  f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
-    msg->fields.push_back(f);
-    f.name = "intensity"; f.offset = 12; f.datatype = sensor_msgs::msg::PointField::FLOAT32; f.count = 1;
-    msg->fields.push_back(f);
-
-    msg->data.resize(num_points * POINT_STEP);
-    for (size_t i = 0; i < num_points; ++i) {
-      auto & pt = accumulated_points_[i].point;
-      uint8_t * dst = &msg->data[i * POINT_STEP];
-      float fx = pt.x * 1e-3f;
-      float fy = pt.y * 1e-3f;
-      float fz = pt.z * 1e-3f;
-      float fi = static_cast<float>(pt.reflectivity);
-      memcpy(dst + 0,  &fx, 4);
-      memcpy(dst + 4,  &fy, 4);
-      memcpy(dst + 8,  &fz, 4);
-      memcpy(dst + 12, &fi, 4);
+    std::lock_guard<std::mutex> lock(custom_queue_mutex_);
+    if (custom_queue_.size() >= kMaxPublisherQueueSize) {
+      custom_queue_.pop_front();
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 1000,
+        "CustomMsg publisher is behind; dropping its oldest frame");
     }
-    cloud_pub_->publish(std::move(msg));
+    custom_queue_.push_back(frame);
   }
+  custom_queue_cv_.notify_one();
 
-  // --- Publish CustomMsg (same timestamp scheme as livox_ros_driver2) ---
   {
-    auto msg = std::make_unique<CustomMsg>();
-    msg->header.stamp = rclcpp::Time(stamp_ns);
-    msg->header.frame_id = "livox_frame";
-    msg->timebase = stamp_ns;
-    msg->point_num = num_points;
-    msg->lidar_id = static_cast<uint8_t>(lidar_handle_ & 0xFF);
-    msg->rsvd.fill(0);
-
-    msg->points.reserve(num_points);
-    for (size_t i = 0; i < num_points; ++i) {
-      auto & pwt = accumulated_points_[i];
-      CustomPoint cp;
-      cp.offset_time  = static_cast<uint32_t>(pwt.offset_time_ns - timebase_ns);
-      cp.x            = pwt.point.x * 1e-3f;
-      cp.y            = pwt.point.y * 1e-3f;
-      cp.z            = pwt.point.z * 1e-3f;
-      cp.reflectivity = pwt.point.reflectivity;
-      cp.tag          = pwt.point.tag;
-      cp.line         = pwt.point.tag & 0x03;
-      msg->points.push_back(cp);
+    std::lock_guard<std::mutex> lock(pointcloud_queue_mutex_);
+    if (pointcloud_queue_.size() >= kMaxPublisherQueueSize) {
+      pointcloud_queue_.pop_front();
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 1000,
+        "PointCloud2 publisher is behind; dropping its oldest frame");
     }
+    pointcloud_queue_.push_back(std::move(frame));
+  }
+  pointcloud_queue_cv_.notify_one();
+}
 
-    custom_pub_->publish(std::move(msg));
+void LivoxVulcanNode::pointcloud_publisher_loop()
+{
+  while (publisher_threads_running_.load(std::memory_order_acquire)) {
+    std::shared_ptr<const PointCloudFrame> frame;
+    {
+      std::unique_lock<std::mutex> lock(pointcloud_queue_mutex_);
+      pointcloud_queue_cv_.wait(lock, [this] {
+        return !publisher_threads_running_.load(std::memory_order_acquire) ||
+               !pointcloud_queue_.empty();
+      });
+      if (!publisher_threads_running_.load(std::memory_order_acquire)) {
+        break;
+      }
+      frame = std::move(pointcloud_queue_.front());
+      pointcloud_queue_.pop_front();
+    }
+    publish_pointcloud_frame(*frame);
+  }
+}
+
+void LivoxVulcanNode::custom_publisher_loop()
+{
+  while (publisher_threads_running_.load(std::memory_order_acquire)) {
+    std::shared_ptr<const PointCloudFrame> frame;
+    {
+      std::unique_lock<std::mutex> lock(custom_queue_mutex_);
+      custom_queue_cv_.wait(lock, [this] {
+        return !publisher_threads_running_.load(std::memory_order_acquire) ||
+               !custom_queue_.empty();
+      });
+      if (!publisher_threads_running_.load(std::memory_order_acquire)) {
+        break;
+      }
+      frame = std::move(custom_queue_.front());
+      custom_queue_.pop_front();
+    }
+    publish_custom_frame(*frame);
+  }
+}
+
+void LivoxVulcanNode::publish_pointcloud_frame(const PointCloudFrame & frame)
+{
+  auto msg = std::make_unique<sensor_msgs::msg::PointCloud2>();
+  msg->header.stamp = rclcpp::Time(frame.stamp_ns);
+  msg->header.frame_id = "livox_frame";
+
+  // PCL-compatible: float x/y/z (meters) + float intensity
+  constexpr uint32_t POINT_STEP = 16;  // 4 floats = 16 bytes
+  msg->height = 1;
+  msg->width = static_cast<uint32_t>(frame.points.size());
+  msg->is_bigendian = false;
+  msg->point_step = POINT_STEP;
+  msg->row_step = msg->width * msg->point_step;
+  msg->is_dense = true;
+
+  sensor_msgs::msg::PointField f;
+  f.name = "x";
+  f.offset = 0;
+  f.datatype = sensor_msgs::msg::PointField::FLOAT32;
+  f.count = 1;
+  msg->fields.push_back(f);
+  f.name = "y";
+  f.offset = 4;
+  msg->fields.push_back(f);
+  f.name = "z";
+  f.offset = 8;
+  msg->fields.push_back(f);
+  f.name = "intensity";
+  f.offset = 12;
+  msg->fields.push_back(f);
+
+  msg->data.resize(frame.points.size() * POINT_STEP);
+  for (size_t i = 0; i < frame.points.size(); ++i) {
+    const auto & pt = frame.points[i].point;
+    uint8_t * dst = &msg->data[i * POINT_STEP];
+    float fx = pt.x * 1e-3f;
+    float fy = pt.y * 1e-3f;
+    float fz = pt.z * 1e-3f;
+    float fi = static_cast<float>(pt.reflectivity);
+    memcpy(dst + 0,  &fx, 4);
+    memcpy(dst + 4,  &fy, 4);
+    memcpy(dst + 8,  &fz, 4);
+    memcpy(dst + 12, &fi, 4);
+  }
+  cloud_pub_->publish(std::move(msg));
+}
+
+void LivoxVulcanNode::publish_custom_frame(const PointCloudFrame & frame)
+{
+  auto msg = std::make_unique<CustomMsg>();
+  msg->header.stamp = rclcpp::Time(frame.stamp_ns);
+  msg->header.frame_id = "livox_frame";
+  msg->timebase = frame.stamp_ns;
+  msg->point_num = static_cast<uint32_t>(frame.points.size());
+  msg->lidar_id = static_cast<uint8_t>(frame.lidar_handle & 0xFF);
+  msg->rsvd.fill(0);
+
+  msg->points.reserve(frame.points.size());
+  for (const auto & pwt : frame.points) {
+    CustomPoint cp;
+    cp.offset_time  = static_cast<uint32_t>(pwt.offset_time_ns - frame.timebase_ns);
+    cp.x            = pwt.point.x * 1e-3f;
+    cp.y            = pwt.point.y * 1e-3f;
+    cp.z            = pwt.point.z * 1e-3f;
+    cp.reflectivity = pwt.point.reflectivity;
+    cp.tag          = pwt.point.tag;
+    cp.line         = pwt.point.tag & 0x03;
+    msg->points.push_back(cp);
   }
 
-  accumulated_points_.clear();
+  custom_pub_->publish(std::move(msg));
+}
+
+void LivoxVulcanNode::start_publisher_threads()
+{
+  publisher_threads_running_.store(true, std::memory_order_release);
+  pointcloud_publisher_thread_ =
+    std::thread(&LivoxVulcanNode::pointcloud_publisher_loop, this);
+  custom_publisher_thread_ =
+    std::thread(&LivoxVulcanNode::custom_publisher_loop, this);
+}
+
+void LivoxVulcanNode::stop_publisher_threads()
+{
+  publisher_threads_running_.store(false, std::memory_order_release);
+  pointcloud_queue_cv_.notify_all();
+  custom_queue_cv_.notify_all();
+
+  if (pointcloud_publisher_thread_.joinable()) {
+    pointcloud_publisher_thread_.join();
+  }
+  if (custom_publisher_thread_.joinable()) {
+    custom_publisher_thread_.join();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pointcloud_queue_mutex_);
+    pointcloud_queue_.clear();
+  }
+  {
+    std::lock_guard<std::mutex> lock(custom_queue_mutex_);
+    custom_queue_.clear();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +345,9 @@ void LivoxVulcanNode::publish_imu_packet(LivoxLidarEthernetPacket * data)
 
   uint64_t ts_raw = GetPacketTimestamp(data);
   uint64_t stamp_ns = ts_raw;
-  if (time_sync_soft_ && first_frame_received_) {
-    stamp_ns = static_cast<uint64_t>(static_cast<int64_t>(ts_raw) + time_offset_ns_);
+  if (time_sync_soft_ && first_frame_received_.load(std::memory_order_acquire)) {
+    stamp_ns = static_cast<uint64_t>(
+      static_cast<int64_t>(ts_raw) + time_offset_ns_.load(std::memory_order_relaxed));
   }
   msg->header.stamp = rclcpp::Time(stamp_ns);
   msg->header.frame_id = "livox_imu";
@@ -353,13 +463,20 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
     return;
   }
 
-  cloud_pub_  = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_topic_, 10);
-  custom_pub_ = this->create_publisher<CustomMsg>(custom_topic_, 10);
-  imu_pub_    = this->create_publisher<sensor_msgs::msg::Imu>(imu_topic_, 200);
+  // QoS queue depths follow livox_ros_driver2's scheme for a single lidar
+  // with dedicated (non-shared) topics: kMinEthPacketQueueSize(32)/8 = 4 for
+  // point cloud / custom msg, kMinEthPacketQueueSize(32)*2 = 64 for imu.
+  // Publishers stay on the rclcpp default profile (Reliable/Volatile/KeepLast)
+  // to match livox_ros_driver2's plain-depth create_publisher() calls.
+  cloud_pub_  = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_topic_, 4);
+  custom_pub_ = this->create_publisher<CustomMsg>(custom_topic_, 4);
+  imu_pub_    = this->create_publisher<sensor_msgs::msg::Imu>(imu_topic_, 64);
 
-  cloud_timer_ = this->create_wall_timer(
+  start_publisher_threads();
+
+  frame_timer_ = this->create_wall_timer(
     std::chrono::milliseconds(100),
-    std::bind(&LivoxVulcanNode::publish_accumulated_cloud, this));
+    std::bind(&LivoxVulcanNode::dispatch_accumulated_frame, this));
 
   // Disable SDK console logs before init (sets the global flag that
   // InitLogger checks, so the console sink is never created)
@@ -399,8 +516,12 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   }
 
   RCLCPP_INFO(this->get_logger(), "  Soft sync   : %s", time_sync_soft_ ? "ON" : "OFF");
-  RCLCPP_INFO(this->get_logger(), "  Cloud topic : %s  [sensor_msgs::PointCloud2]", cloud_topic_.c_str());
-  RCLCPP_INFO(this->get_logger(), "  Custom topic: %s  [livox_ros_msg::CustomMsg]", custom_topic_.c_str());
+  RCLCPP_INFO(
+    this->get_logger(), "  Cloud topic : %s  [sensor_msgs::PointCloud2]",
+    cloud_topic_.c_str());
+  RCLCPP_INFO(
+    this->get_logger(), "  Custom topic: %s  [livox_ros_msg::CustomMsg]",
+    custom_topic_.c_str());
   RCLCPP_INFO(this->get_logger(), "  IMU topic   : %s  [sensor_msgs::Imu]", imu_topic_.c_str());
   RCLCPP_INFO(this->get_logger(), "========================================");
 
@@ -418,5 +539,9 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
 
 LivoxVulcanNode::~LivoxVulcanNode()
 {
+  if (frame_timer_) {
+    frame_timer_->cancel();
+  }
   LivoxLidarSdkUninit();
+  stop_publisher_threads();
 }
