@@ -21,6 +21,7 @@ def generate_launch_description():
             executable='livox_vulcan_driver2_node',
             name='livox_vulcan_node',
             output='screen',
+            required=True,
             parameters=[config, {'config_path': livox_config}]
         ),
         IncludeLaunchDescription(

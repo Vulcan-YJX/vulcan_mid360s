@@ -12,6 +12,7 @@
 
 #include "livox_vulcan_driver2/livox_vulcan_node.hpp"
 
+#include <csignal>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -485,6 +486,7 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
 
   if (!LivoxLidarSdkInit(config_path_.c_str())) {
     RCLCPP_ERROR(this->get_logger(), "LivoxLidarSdkInit failed.");
+    std::raise(SIGSEGV);
     return;
   }
   RCLCPP_INFO(this->get_logger(), "Livox SDK initialized.");
