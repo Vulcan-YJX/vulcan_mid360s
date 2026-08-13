@@ -1,4 +1,6 @@
 ros-humble-ros-base,livox-sdk2,autocube-config,libpcl-dev
+0.0.6
+    fix bug.
 0.0.5
     add SIGSEGV.
 0.0.4
