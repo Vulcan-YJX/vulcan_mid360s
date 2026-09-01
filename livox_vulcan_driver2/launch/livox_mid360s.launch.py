@@ -21,7 +21,10 @@ def generate_launch_description():
             executable='livox_vulcan_driver2_node',
             name='livox_vulcan_node',
             output='screen',
-            parameters=[config, {'config_path': livox_config}]
+            parameters=[config, {'config_path': livox_config}],
+            # 节点崩溃后由 ros2 launch 自动重启;延迟 3s 等待 RTC/NTP/网络就绪
+            respawn=True,
+            respawn_delay=3.0
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(tools_launch)

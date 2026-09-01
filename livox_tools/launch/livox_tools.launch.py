@@ -34,6 +34,8 @@ def generate_launch_description():
             executable='livox_tools_node',
             name='livox_tools_node',
             output='screen',
-            parameters=[config]
+            parameters=[config],
+            respawn=True,
+            respawn_delay=2.0
         ),
     ])
