@@ -49,21 +49,35 @@ void livoxToolsNode::pointcloud_callback(const sensor_msgs::msg::PointCloud2::Sh
     msg->width, msg->height);
 
   if (!lidar_pose_init_) {
-    if (tf_buffer_.canTransform(
-      base_link_, msg->header.frame_id, msg->header.stamp,
-      rclcpp::Duration(1, 0))) {
-        geometry_msgs::msg::TransformStamped lidar_transformStamped = tf_buffer_.lookupTransform(
-          base_link_, msg->header.frame_id, tf2_ros::fromMsg(msg->header.stamp));
-        const auto & lidar_t = lidar_transformStamped.transform.translation;
-        const auto & lidar_quat = lidar_transformStamped.transform.rotation;
-        Eigen::Quaterniond lidar_q(lidar_quat.w, lidar_quat.x, lidar_quat.y, lidar_quat.z);
-        Eigen::Matrix3d R = lidar_q.toRotationMatrix();
-        lidar_init_rpy_ = R.eulerAngles(0, 1, 2);
-        Eigen::Vector3d lidar_trans(lidar_t.x, lidar_t.y, lidar_t.z);
-        lidar_pose_ = Sophus::SE3d(lidar_q, lidar_trans);
-        lidar_pose_init_ = true;
+    // Query the latest available transform (TimePointZero), not the cloud
+    // timestamp: the static TF is latched and may not have a sample at the
+    // exact point-cloud stamp, which spams TF_OLD_DATA.
+    try {
+      geometry_msgs::msg::TransformStamped lidar_transformStamped =
+        tf_buffer_.lookupTransform(
+          base_link_, msg->header.frame_id,
+          tf2::TimePointZero,
+          rclcpp::Duration::from_seconds(2.0));
+      const auto & lidar_t = lidar_transformStamped.transform.translation;
+      const auto & lidar_quat = lidar_transformStamped.transform.rotation;
+      Eigen::Quaterniond lidar_q(lidar_quat.w, lidar_quat.x, lidar_quat.y, lidar_quat.z);
+      Eigen::Matrix3d R = lidar_q.toRotationMatrix();
+      lidar_init_rpy_ = R.eulerAngles(0, 1, 2);
+      Eigen::Vector3d lidar_trans(lidar_t.x, lidar_t.y, lidar_t.z);
+      lidar_pose_ = Sophus::SE3d(lidar_q, lidar_trans);
+      lidar_pose_init_ = true;
+      RCLCPP_INFO(this->get_logger(),
+        "TF %s <- %s acquired: t=(%.4f, %.4f, %.4f)",
+        base_link_.c_str(), msg->header.frame_id.c_str(),
+        lidar_t.x, lidar_t.y, lidar_t.z);
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "Waiting for TF %s <- %s: %s",
+        base_link_.c_str(), msg->header.frame_id.c_str(), ex.what());
     }
-  } else {
+    return;
+  }
+  {
     pcl::PointCloud<pcl::PointXYZI> cloud_in, cloud_trans;
     pcl::fromROSMsg(*msg, cloud_in);
 

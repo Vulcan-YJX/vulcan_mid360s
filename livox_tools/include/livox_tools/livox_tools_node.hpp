@@ -15,6 +15,8 @@
 
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include "tf2/time.h"
+#include "tf2/exceptions.h"
 #include "sophus/se3.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
