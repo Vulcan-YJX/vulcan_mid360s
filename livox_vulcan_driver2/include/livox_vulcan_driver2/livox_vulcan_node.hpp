@@ -105,6 +105,8 @@ private:
 
   // Config
   std::string config_path_;
+  double min_range_{0.0};       // meters; points closer than this are dropped
+  float min_range_sq_{0.0f};    // squared threshold in meters, precomputed
   std::string cloud_topic_;
   std::string custom_topic_;
   std::string imu_topic_;

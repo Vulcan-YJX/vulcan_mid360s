@@ -263,19 +263,28 @@ void LivoxVulcanNode::publish_pointcloud_frame(const PointCloudFrame & frame)
   f.offset = 12;
   msg->fields.push_back(f);
 
-  msg->data.resize(frame.points.size() * POINT_STEP);
+  msg->data.reserve(frame.points.size() * POINT_STEP);
+  const float filter_sq = min_range_sq_;
   for (size_t i = 0; i < frame.points.size(); ++i) {
     const auto & pt = frame.points[i].point;
-    uint8_t * dst = &msg->data[i * POINT_STEP];
     float fx = pt.x * 1e-3f;
     float fy = pt.y * 1e-3f;
     float fz = pt.z * 1e-3f;
+    if (filter_sq > 0.0f &&
+        fx * fx + fy * fy + fz * fz < filter_sq) {
+      continue;  // too close to the sensor; drop
+    }
     float fi = static_cast<float>(pt.reflectivity);
+    size_t base = msg->data.size();
+    msg->data.resize(base + POINT_STEP);
+    uint8_t * dst = &msg->data[base];
     memcpy(dst + 0,  &fx, 4);
     memcpy(dst + 4,  &fy, 4);
     memcpy(dst + 8,  &fz, 4);
     memcpy(dst + 12, &fi, 4);
   }
+  msg->width = static_cast<uint32_t>(msg->data.size() / POINT_STEP);
+  msg->row_step = msg->width * msg->point_step;
   cloud_pub_->publish(std::move(msg));
 }
 
@@ -290,17 +299,26 @@ void LivoxVulcanNode::publish_custom_frame(const PointCloudFrame & frame)
   msg->rsvd.fill(0);
 
   msg->points.reserve(frame.points.size());
+  const float filter_sq = min_range_sq_;
   for (const auto & pwt : frame.points) {
+    const float fx = pwt.point.x * 1e-3f;
+    const float fy = pwt.point.y * 1e-3f;
+    const float fz = pwt.point.z * 1e-3f;
+    if (filter_sq > 0.0f &&
+        fx * fx + fy * fy + fz * fz < filter_sq) {
+      continue;  // too close to the sensor; drop
+    }
     CustomPoint cp;
     cp.offset_time  = static_cast<uint32_t>(pwt.offset_time_ns - frame.timebase_ns);
-    cp.x            = pwt.point.x * 1e-3f;
-    cp.y            = pwt.point.y * 1e-3f;
-    cp.z            = pwt.point.z * 1e-3f;
+    cp.x            = fx;
+    cp.y            = fy;
+    cp.z            = fz;
     cp.reflectivity = pwt.point.reflectivity;
     cp.tag          = pwt.point.tag;
     cp.line         = pwt.point.tag & 0x03;
     msg->points.push_back(cp);
   }
+  msg->point_num = static_cast<uint32_t>(msg->points.size());
 
   custom_pub_->publish(std::move(msg));
 }
@@ -447,6 +465,12 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   custom_topic_ = this->get_parameter("custom_topic").as_string();
   imu_topic_    = this->get_parameter("imu_topic").as_string();
 
+  if (!this->has_parameter("min_range")) {
+    this->declare_parameter<double>("min_range", 0.0);
+  }
+  min_range_ = this->get_parameter("min_range").as_double();
+  min_range_sq_ = static_cast<float>(min_range_ * min_range_);
+
   if (!this->has_parameter("time_sync_soft")) {
     this->declare_parameter<bool>("time_sync_soft", false);
   }
@@ -518,6 +542,9 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   }
 
   RCLCPP_INFO(this->get_logger(), "  Soft sync   : %s", time_sync_soft_ ? "ON" : "OFF");
+  if (min_range_ > 0.0) {
+    RCLCPP_INFO(this->get_logger(), "  Min range   : %.3f m (near points filtered)", min_range_);
+  }
   RCLCPP_INFO(
     this->get_logger(), "  Cloud topic : %s  [sensor_msgs::PointCloud2]",
     cloud_topic_.c_str());
