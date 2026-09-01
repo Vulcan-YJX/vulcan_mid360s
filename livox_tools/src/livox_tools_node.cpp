@@ -57,7 +57,7 @@ void livoxToolsNode::pointcloud_callback(const sensor_msgs::msg::PointCloud2::Sh
         tf_buffer_.lookupTransform(
           base_link_, msg->header.frame_id,
           tf2::TimePointZero,
-          rclcpp::Duration::from_seconds(2.0));
+          tf2::durationFromSec(0.2));
       const auto & lidar_t = lidar_transformStamped.transform.translation;
       const auto & lidar_quat = lidar_transformStamped.transform.rotation;
       Eigen::Quaterniond lidar_q(lidar_quat.w, lidar_quat.x, lidar_quat.y, lidar_quat.z);
