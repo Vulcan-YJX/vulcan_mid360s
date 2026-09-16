@@ -1,4 +1,6 @@
 ros-humble-ros-base,livox-sdk2,autocube-config,libpcl-dev
+0.0.11
+    update rectangle param.
 0.0.10
     add cut rectangle
 0.0.9
