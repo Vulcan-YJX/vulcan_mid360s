@@ -74,6 +74,10 @@ private:
   void stop_publisher_threads();
   void publish_imu_packet(LivoxLidarEthernetPacket * data);
 
+  // Transform a raw point from livox_frame to autocube_link and test whether
+  // it falls inside the configured self-exclusion cuboid.
+  bool is_inside_exclusion_box(const LivoxLidarCartesianHighRawPoint & point) const;
+
   // --- Timestamp helpers (same scheme as livox_ros_driver2) ---
   static uint64_t GetPacketTimestamp(const LivoxLidarEthernetPacket * data);
 
@@ -110,6 +114,19 @@ private:
   std::string cloud_topic_;
   std::string custom_topic_;
   std::string imu_topic_;
+
+  // Point exclusion cuboid expressed in autocube_link (meters). The static TF
+  // has zero translation and quaternion (0, 0.173648, 0, 0.984807), equivalent
+  // to a +20 degree rotation about Y from livox_frame to autocube_link.
+  bool exclusion_box_enabled_{false};
+  float exclusion_box_front_{0.0f};   // +X
+  float exclusion_box_back_{0.0f};    // -X
+  float exclusion_box_left_{0.0f};    // +Y
+  float exclusion_box_right_{0.0f};   // -Y
+  float exclusion_box_top_{0.0f};     // +Z
+  float exclusion_box_bottom_{0.0f};  // -Z
+  float livox_to_autocube_cos_pitch_{1.0f};
+  float livox_to_autocube_sin_pitch_{0.0f};
 
   // Soft time sync: align LiDAR PTP time to system clock on first frame
   bool time_sync_soft_{false};

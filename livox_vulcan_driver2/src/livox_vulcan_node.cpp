@@ -12,6 +12,7 @@
 
 #include "livox_vulcan_driver2/livox_vulcan_node.hpp"
 
+#include <cmath>
 #include <csignal>
 #include <cstring>
 #include <fstream>
@@ -32,6 +33,42 @@ uint64_t LivoxVulcanNode::GetPacketTimestamp(const LivoxLidarEthernetPacket * da
   } ts;
   memcpy(ts.bytes, data->timestamp, sizeof(ts.bytes));
   return static_cast<uint64_t>(ts.stamp);
+}
+
+// ---------------------------------------------------------------------------
+// Self-exclusion cuboid
+//
+// static_transform_publisher describes the pose of livox_frame in
+// autocube_link. Translation is zero and the quaternion is a +20 degree
+// rotation around Y, therefore:
+//   p_autocube = R_y(+20 deg) * p_livox
+// ---------------------------------------------------------------------------
+bool LivoxVulcanNode::is_inside_exclusion_box(
+  const LivoxLidarCartesianHighRawPoint & point) const
+{
+  if (!exclusion_box_enabled_) {
+    return false;
+  }
+
+  constexpr float kMillimetersToMeters = 1e-3f;
+  const float lidar_x = point.x * kMillimetersToMeters;
+  const float lidar_y = point.y * kMillimetersToMeters;
+  const float lidar_z = point.z * kMillimetersToMeters;
+
+  const float autocube_x =
+    livox_to_autocube_cos_pitch_ * lidar_x +
+    livox_to_autocube_sin_pitch_ * lidar_z;
+  const float autocube_y = lidar_y;
+  const float autocube_z =
+    -livox_to_autocube_sin_pitch_ * lidar_x +
+    livox_to_autocube_cos_pitch_ * lidar_z;
+
+  return autocube_x >= -exclusion_box_back_ &&
+         autocube_x <= exclusion_box_front_ &&
+         autocube_y >= -exclusion_box_right_ &&
+         autocube_y <= exclusion_box_left_ &&
+         autocube_z >= -exclusion_box_bottom_ &&
+         autocube_z <= exclusion_box_top_;
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +100,12 @@ void LivoxVulcanNode::OnPointCloud(uint32_t handle, const uint8_t dev_type,
   std::lock_guard<std::mutex> lock(node->cloud_mutex_);
 
   for (uint16_t i = 0; i < data->dot_num; ++i) {
+    // The raw point is in livox_frame. Filter the robot/body volume after
+    // transforming it into autocube_link, before it reaches either publisher.
+    if (node->is_inside_exclusion_box(pts[i])) {
+      continue;
+    }
+
     PointWithTime pwt;
     pwt.point = pts[i];
     pwt.offset_time_ns = pkt_timestamp_ns + i * point_interval_ns;
@@ -471,6 +514,70 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   min_range_ = this->get_parameter("min_range").as_double();
   min_range_sq_ = static_cast<float>(min_range_ * min_range_);
 
+  if (!this->has_parameter("exclusion_box.enabled")) {
+    this->declare_parameter<bool>("exclusion_box.enabled", false);
+  }
+  if (!this->has_parameter("exclusion_box.front")) {
+    this->declare_parameter<double>("exclusion_box.front", 0.0);
+  }
+  if (!this->has_parameter("exclusion_box.back")) {
+    this->declare_parameter<double>("exclusion_box.back", 0.0);
+  }
+  if (!this->has_parameter("exclusion_box.left")) {
+    this->declare_parameter<double>("exclusion_box.left", 0.0);
+  }
+  if (!this->has_parameter("exclusion_box.right")) {
+    this->declare_parameter<double>("exclusion_box.right", 0.0);
+  }
+  if (!this->has_parameter("exclusion_box.top")) {
+    this->declare_parameter<double>("exclusion_box.top", 0.0);
+  }
+  if (!this->has_parameter("exclusion_box.bottom")) {
+    this->declare_parameter<double>("exclusion_box.bottom", 0.0);
+  }
+
+  exclusion_box_enabled_ = this->get_parameter("exclusion_box.enabled").as_bool();
+  exclusion_box_front_ =
+    static_cast<float>(this->get_parameter("exclusion_box.front").as_double());
+  exclusion_box_back_ =
+    static_cast<float>(this->get_parameter("exclusion_box.back").as_double());
+  exclusion_box_left_ =
+    static_cast<float>(this->get_parameter("exclusion_box.left").as_double());
+  exclusion_box_right_ =
+    static_cast<float>(this->get_parameter("exclusion_box.right").as_double());
+  exclusion_box_top_ =
+    static_cast<float>(this->get_parameter("exclusion_box.top").as_double());
+  exclusion_box_bottom_ =
+    static_cast<float>(this->get_parameter("exclusion_box.bottom").as_double());
+
+  // Normalize the supplied static-TF quaternion before deriving its Y-axis
+  // rotation matrix. This also avoids relying on rounded quaternion values
+  // being exactly unit length.
+  constexpr float kTfQy = 0.173648f;
+  constexpr float kTfQw = 0.984807f;
+  const float tf_norm_sq = kTfQy * kTfQy + kTfQw * kTfQw;
+  livox_to_autocube_cos_pitch_ =
+    (kTfQw * kTfQw - kTfQy * kTfQy) / tf_norm_sq;
+  livox_to_autocube_sin_pitch_ = 2.0f * kTfQw * kTfQy / tf_norm_sq;
+
+  const bool exclusion_box_values_valid =
+    std::isfinite(exclusion_box_front_) && exclusion_box_front_ >= 0.0f &&
+    std::isfinite(exclusion_box_back_) && exclusion_box_back_ >= 0.0f &&
+    std::isfinite(exclusion_box_left_) && exclusion_box_left_ >= 0.0f &&
+    std::isfinite(exclusion_box_right_) && exclusion_box_right_ >= 0.0f &&
+    std::isfinite(exclusion_box_top_) && exclusion_box_top_ >= 0.0f &&
+    std::isfinite(exclusion_box_bottom_) && exclusion_box_bottom_ >= 0.0f &&
+    exclusion_box_front_ + exclusion_box_back_ > 0.0f &&
+    exclusion_box_left_ + exclusion_box_right_ > 0.0f &&
+    exclusion_box_top_ + exclusion_box_bottom_ > 0.0f;
+  if (exclusion_box_enabled_ && !exclusion_box_values_valid) {
+    RCLCPP_ERROR(
+      this->get_logger(),
+      "Invalid exclusion_box: distances must be finite/non-negative and each "
+      "axis must have a non-zero extent. Disabling exclusion filter.");
+    exclusion_box_enabled_ = false;
+  }
+
   if (!this->has_parameter("time_sync_soft")) {
     this->declare_parameter<bool>("time_sync_soft", false);
   }
@@ -544,6 +651,17 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   RCLCPP_INFO(this->get_logger(), "  Soft sync   : %s", time_sync_soft_ ? "ON" : "OFF");
   if (min_range_ > 0.0) {
     RCLCPP_INFO(this->get_logger(), "  Min range   : %.3f m (near points filtered)", min_range_);
+  }
+  if (exclusion_box_enabled_) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "  Exclude box: autocube_link X=[-%.3f, %.3f] Y=[-%.3f, %.3f] "
+      "Z=[-%.3f, %.3f] m",
+      exclusion_box_back_, exclusion_box_front_,
+      exclusion_box_right_, exclusion_box_left_,
+      exclusion_box_bottom_, exclusion_box_top_);
+  } else {
+    RCLCPP_INFO(this->get_logger(), "  Exclude box: OFF");
   }
   RCLCPP_INFO(
     this->get_logger(), "  Cloud topic : %s  [sensor_msgs::PointCloud2]",

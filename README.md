@@ -36,6 +36,15 @@ source install/setup.bash
       cloud_topic: "livox/pointcloud"
       custom_topic: "livox/custom_msg"
       imu_topic: "livox/imu"
+      min_range: 0.3
+      exclusion_box:
+        enabled: true
+        front: 0.0    # autocube_link +X，单位 m
+        back: 5.0     # autocube_link -X
+        left: 2.0     # autocube_link +Y
+        right: 2.0    # autocube_link -Y
+        top: 0.5      # autocube_link +Z
+        bottom: 0.5   # autocube_link -Z
 ```
 
 ### livox_lidar_config.json — 网络配置
@@ -67,6 +76,23 @@ source install/setup.bash
 
 - `host_ip` — **本机**连接雷达网卡的 IP，不能填 `127.0.0.1`
 - `lidar_ip` — 雷达设备 IP（不填则走广播自动发现）
+
+### autocube_link 长方体过滤
+
+驱动按照静态 TF 中的四元数 `(0, 0.173648, 0, 0.984807)`，先将每个原始点从
+`livox_frame` 转换到 `autocube_link`。位于 `exclusion_box` 边界上或内部的点会在
+采集阶段被丢弃，因此不会进入 `livox/pointcloud` 和 `livox/custom_msg`。两个 Topic
+中保留的点仍使用 `livox_frame` 坐标，不会改变原有消息坐标系。
+
+范围定义为：
+
+```text
+X: [-back,   front]
+Y: [-right,  left]
+Z: [-bottom, top]
+```
+
+设置 `exclusion_box.enabled: false` 可关闭该过滤器。
 
 ## 运行
 

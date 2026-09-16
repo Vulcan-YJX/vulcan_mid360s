@@ -8,3 +8,15 @@
       time_sync_soft: true
       time_sync_wait_count: 10
       min_range: 0.3       # meters; points closer than this are dropped from all outputs (0 = disabled)
+
+      # autocube_link 坐标系下的长方体排除区域（单位：米）。
+      # 坐标约定：前=+X，后=-X，左=+Y，右=-Y，上=+Z，下=-Z。
+      # 落在边界上或长方体内部的点不会进入 livox/custom_msg 和 livox/pointcloud。
+      exclusion_box:
+        enabled: true
+        front: 0.0
+        back: 5.0
+        left: 2.0
+        right: 2.0
+        top: 0.5
+        bottom: 0.5
