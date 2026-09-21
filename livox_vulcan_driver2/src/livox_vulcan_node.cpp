@@ -100,6 +100,12 @@ void LivoxVulcanNode::OnPointCloud(uint32_t handle, const uint8_t dev_type,
   std::lock_guard<std::mutex> lock(node->cloud_mutex_);
 
   for (uint16_t i = 0; i < data->dot_num; ++i) {
+    // Livox reflectivity is an unsigned 8-bit value. Drop weak returns at the
+    // acquisition stage so they never enter PointCloud2 or CustomMsg.
+    if (static_cast<float>(pts[i].reflectivity) < node->intensity_threshold_) {
+      continue;
+    }
+
     // The raw point is in livox_frame. Filter the robot/body volume after
     // transforming it into autocube_link, before it reaches either publisher.
     if (node->is_inside_exclusion_box(pts[i])) {
@@ -514,6 +520,21 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   min_range_ = this->get_parameter("min_range").as_double();
   min_range_sq_ = static_cast<float>(min_range_ * min_range_);
 
+  if (!this->has_parameter("intensity_threshold")) {
+    this->declare_parameter<double>("intensity_threshold", 7.0);
+  }
+  intensity_threshold_ =
+    static_cast<float>(this->get_parameter("intensity_threshold").as_double());
+  if (!std::isfinite(intensity_threshold_) ||
+      intensity_threshold_ < 0.0f || intensity_threshold_ > 255.0f) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Invalid intensity_threshold %.3f; expected a finite value in [0, 255]. "
+      "Using default 7.0.",
+      intensity_threshold_);
+    intensity_threshold_ = 7.0f;
+  }
+
   if (!this->has_parameter("exclusion_box.enabled")) {
     this->declare_parameter<bool>("exclusion_box.enabled", false);
   }
@@ -652,6 +673,10 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   if (min_range_ > 0.0) {
     RCLCPP_INFO(this->get_logger(), "  Min range   : %.3f m (near points filtered)", min_range_);
   }
+  RCLCPP_INFO(
+    this->get_logger(),
+    "  Min intensity: %.1f (points below threshold filtered)",
+    intensity_threshold_);
   if (exclusion_box_enabled_) {
     RCLCPP_INFO(
       this->get_logger(),

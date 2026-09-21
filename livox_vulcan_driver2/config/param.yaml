@@ -8,6 +8,7 @@
       time_sync_soft: true
       time_sync_wait_count: 10
       min_range: 0.2       # meters; points closer than this are dropped from all outputs (0 = disabled)
+      intensity_threshold: 7.0  # drop points with reflectivity/intensity below this value (0-255)
 
       # autocube_link 坐标系下的长方体排除区域（单位：米）。
       # 坐标约定：前=+X，后=-X，左=+Y，右=-Y，上=+Z，下=-Z。
