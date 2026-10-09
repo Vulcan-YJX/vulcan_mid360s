@@ -5,6 +5,7 @@
       cloud_topic: "livox/pointcloud"
       custom_topic: "livox/custom_msg"
       imu_topic: "livox/imu"
+      imu_publish_queue_size: 1024  # bounded FIFO and DDS history; overflow warns and drops oldest
       time_sync_soft: true
       time_sync_wait_count: 10
       min_range: 0.2       # meters; points closer than this are dropped from all outputs (0 = disabled)

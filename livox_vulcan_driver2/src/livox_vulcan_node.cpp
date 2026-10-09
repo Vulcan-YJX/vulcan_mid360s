@@ -125,14 +125,39 @@ void LivoxVulcanNode::OnImuData(uint32_t handle, const uint8_t dev_type,
   (void)handle;
   (void)dev_type;
 
-  if (data == nullptr || data->data_type != kLivoxLidarImuData) {
+  if (data == nullptr || data->data_type != kLivoxLidarImuData || data->dot_num == 0) {
     return;
   }
 
   auto * node = static_cast<LivoxVulcanNode *>(client_data);
   if (node == nullptr) return;
 
-  node->publish_imu_packet(data);
+  const size_t payload_size = static_cast<size_t>(data->dot_num) * sizeof(LivoxLidarImuRawPoint);
+  if (data->length < offsetof(LivoxLidarEthernetPacket, data) + payload_size) {
+    return;
+  }
+
+  ImuPacket packet;
+  packet.stamp_ns = GetPacketTimestamp(data);
+  if (node->time_sync_soft_ && node->first_frame_received_.load(std::memory_order_acquire)) {
+    packet.stamp_ns = static_cast<uint64_t>(
+      static_cast<int64_t>(packet.stamp_ns) + node->time_offset_ns_.load(std::memory_order_relaxed));
+  }
+  packet.points.resize(data->dot_num);
+  std::memcpy(packet.points.data(), data->data, payload_size);
+
+  {
+    std::lock_guard<std::mutex> lock(node->imu_queue_mutex_);
+    if (!node->publisher_threads_running_.load(std::memory_order_acquire)) {
+      return;
+    }
+    if (node->imu_queue_.size() >= node->imu_publish_queue_size_) {
+      node->imu_queue_.pop_front();
+      ++node->imu_queue_dropped_;
+    }
+    node->imu_queue_.push_back(std::move(packet));
+  }
+  node->imu_queue_cv_.notify_one();
 }
 
 // ---------------------------------------------------------------------------
@@ -374,23 +399,38 @@ void LivoxVulcanNode::publish_custom_frame(const PointCloudFrame & frame)
 void LivoxVulcanNode::start_publisher_threads()
 {
   publisher_threads_running_.store(true, std::memory_order_release);
-  pointcloud_publisher_thread_ =
-    std::thread(&LivoxVulcanNode::pointcloud_publisher_loop, this);
-  custom_publisher_thread_ =
-    std::thread(&LivoxVulcanNode::custom_publisher_loop, this);
+  try {
+    pointcloud_publisher_thread_ =
+      std::thread(&LivoxVulcanNode::pointcloud_publisher_loop, this);
+    custom_publisher_thread_ =
+      std::thread(&LivoxVulcanNode::custom_publisher_loop, this);
+    imu_publisher_thread_ =
+      std::thread(&LivoxVulcanNode::imu_publisher_loop, this);
+  } catch (...) {
+    stop_publisher_threads();
+    throw;
+  }
 }
 
 void LivoxVulcanNode::stop_publisher_threads()
 {
-  publisher_threads_running_.store(false, std::memory_order_release);
+  {
+    // Change the wait predicate under each queue's mutex to avoid missed wakeups.
+    std::scoped_lock lock(pointcloud_queue_mutex_, custom_queue_mutex_, imu_queue_mutex_);
+    publisher_threads_running_.store(false, std::memory_order_release);
+  }
   pointcloud_queue_cv_.notify_all();
   custom_queue_cv_.notify_all();
+  imu_queue_cv_.notify_all();
 
   if (pointcloud_publisher_thread_.joinable()) {
     pointcloud_publisher_thread_.join();
   }
   if (custom_publisher_thread_.joinable()) {
     custom_publisher_thread_.join();
+  }
+  if (imu_publisher_thread_.joinable()) {
+    imu_publisher_thread_.join();
   }
 
   {
@@ -401,38 +441,65 @@ void LivoxVulcanNode::stop_publisher_threads()
     std::lock_guard<std::mutex> lock(custom_queue_mutex_);
     custom_queue_.clear();
   }
+  {
+    std::lock_guard<std::mutex> lock(imu_queue_mutex_);
+    imu_queue_.clear();
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Publish IMU packet
+// Publish IMU packets in FIFO order, without holding the queue lock during DDS
+// calls. Report overflow here rather than doing logging on the SDK IO thread.
 // ---------------------------------------------------------------------------
-void LivoxVulcanNode::publish_imu_packet(LivoxLidarEthernetPacket * data)
+void LivoxVulcanNode::imu_publisher_loop()
 {
-  auto msg = std::make_unique<sensor_msgs::msg::Imu>();
-
-  uint64_t ts_raw = GetPacketTimestamp(data);
-  uint64_t stamp_ns = ts_raw;
-  if (time_sync_soft_ && first_frame_received_.load(std::memory_order_acquire)) {
-    stamp_ns = static_cast<uint64_t>(
-      static_cast<int64_t>(ts_raw) + time_offset_ns_.load(std::memory_order_relaxed));
+  uint64_t last_reported_drops = 0;
+  while (publisher_threads_running_.load(std::memory_order_acquire)) {
+    ImuPacket packet;
+    uint64_t dropped;
+    {
+      std::unique_lock<std::mutex> lock(imu_queue_mutex_);
+      imu_queue_cv_.wait(lock, [this] {
+        return !publisher_threads_running_.load(std::memory_order_acquire) || !imu_queue_.empty();
+      });
+      if (!publisher_threads_running_.load(std::memory_order_acquire)) {
+        break;
+      }
+      packet = std::move(imu_queue_.front());
+      imu_queue_.pop_front();
+      dropped = imu_queue_dropped_;
+    }
+    if (dropped != last_reported_drops) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 1000,
+        "IMU publisher queue overflow (capacity=%zu): dropped %llu oldest packets in total",
+        imu_publish_queue_size_, static_cast<unsigned long long>(dropped));
+      last_reported_drops = dropped;
+    }
+    publish_imu_packet(packet);
   }
-  msg->header.stamp = rclcpp::Time(stamp_ns);
-  msg->header.frame_id = "livox_imu";
+}
 
-  LivoxLidarImuRawPoint * imu_pts =
-    reinterpret_cast<LivoxLidarImuRawPoint *>(data->data);
+void LivoxVulcanNode::publish_imu_packet(const ImuPacket & packet)
+{
+  if (packet.points.empty()) {
+    return;
+  }
+  auto msg = std::make_unique<sensor_msgs::msg::Imu>();
+  msg->header.stamp = rclcpp::Time(packet.stamp_ns);
+  msg->header.frame_id = "livox_imu";
 
   float gyro_x = 0, gyro_y = 0, gyro_z = 0;
   float acc_x = 0, acc_y = 0, acc_z = 0;
-  for (uint16_t i = 0; i < data->dot_num; ++i) {
-    gyro_x += imu_pts[i].gyro_x;
-    gyro_y += imu_pts[i].gyro_y;
-    gyro_z += imu_pts[i].gyro_z;
-    acc_x  += imu_pts[i].acc_x;
-    acc_y  += imu_pts[i].acc_y;
-    acc_z  += imu_pts[i].acc_z;
+  for (const auto & point : packet.points) {
+    gyro_x += point.gyro_x;
+    gyro_y += point.gyro_y;
+    gyro_z += point.gyro_z;
+    acc_x  += point.acc_x;
+    acc_y  += point.acc_y;
+    acc_z  += point.acc_z;
   }
-  float inv = 1.0f / static_cast<float>(data->dot_num);
+  float inv = 1.0f / static_cast<float>(packet.points.size());
   msg->angular_velocity.x = gyro_x * inv;
   msg->angular_velocity.y = gyro_y * inv;
   msg->angular_velocity.z = gyro_z * inv;
@@ -512,6 +579,16 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   cloud_topic_  = this->get_parameter("cloud_topic").as_string();
   custom_topic_ = this->get_parameter("custom_topic").as_string();
   imu_topic_    = this->get_parameter("imu_topic").as_string();
+
+  if (!this->has_parameter("imu_publish_queue_size")) {
+    this->declare_parameter<int>("imu_publish_queue_size", 1024);
+  }
+  const auto imu_queue_size = this->get_parameter("imu_publish_queue_size").as_int();
+  if (imu_queue_size <= 0) {
+    RCLCPP_WARN(this->get_logger(), "imu_publish_queue_size must be positive; using 1024");
+  } else {
+    imu_publish_queue_size_ = static_cast<size_t>(imu_queue_size);
+  }
 
   if (!this->has_parameter("min_range")) {
     this->declare_parameter<double>("min_range", 0.0);
@@ -615,14 +692,11 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
     return;
   }
 
-  // QoS queue depths follow livox_ros_driver2's scheme for a single lidar
-  // with dedicated (non-shared) topics: kMinEthPacketQueueSize(32)/8 = 4 for
-  // point cloud / custom msg, kMinEthPacketQueueSize(32)*2 = 64 for imu.
-  // Publishers stay on the rclcpp default profile (Reliable/Volatile/KeepLast)
-  // to match livox_ros_driver2's plain-depth create_publisher() calls.
+  // Keep Reliable/Volatile QoS for compatibility with livox_tools. The IMU
+  // application queue and DDS history both absorb short scheduling stalls.
   cloud_pub_  = this->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_topic_, 4);
   custom_pub_ = this->create_publisher<CustomMsg>(custom_topic_, 4);
-  imu_pub_    = this->create_publisher<sensor_msgs::msg::Imu>(imu_topic_, 64);
+  imu_pub_    = this->create_publisher<sensor_msgs::msg::Imu>(imu_topic_, imu_publish_queue_size_);
 
   start_publisher_threads();
 
@@ -694,6 +768,9 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
     this->get_logger(), "  Custom topic: %s  [livox_ros_msg::CustomMsg]",
     custom_topic_.c_str());
   RCLCPP_INFO(this->get_logger(), "  IMU topic   : %s  [sensor_msgs::Imu]", imu_topic_.c_str());
+  RCLCPP_INFO(
+    this->get_logger(), "  IMU queue   : %zu packets (dedicated publisher thread)",
+    imu_publish_queue_size_);
   RCLCPP_INFO(this->get_logger(), "========================================");
 
   SetLivoxLidarPointCloudCallBack(OnPointCloud, this);

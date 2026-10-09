@@ -5,7 +5,6 @@ After=autocube-config.service
 PartOf=autocube-config.service
 
 [Service]
-CPUAffinity=1
 EnvironmentFile=/opt/autocube/autocube_env.conf
 WorkingDirectory=/opt/autocube
 ExecStart=/usr/bin/bash -c "source /opt/ros/humble/setup.bash && source /opt/autocube/vulcan-mid360s/setup.bash && ros2 launch livox_vulcan_driver2 livox_mid360s.launch.py"

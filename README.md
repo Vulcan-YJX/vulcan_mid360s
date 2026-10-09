@@ -36,6 +36,7 @@ source install/setup.bash
       cloud_topic: "livox/pointcloud"
       custom_topic: "livox/custom_msg"
       imu_topic: "livox/imu"
+      imu_publish_queue_size: 1024  # IMU 发布 FIFO 与 DDS history 深度，必须大于 0
       min_range: 0.3
       intensity_threshold: 7.0  # 仅 CustomMsg 删除 reflectivity 小于该值的点
       exclusion_box:
@@ -104,6 +105,24 @@ Z: [-bottom, top]
 
 `livox/pointcloud`（`sensor_msgs::msg::PointCloud2`）不受该参数影响，保留所有强度的点，
 其 `intensity` 字段仍为原始 `reflectivity`。距离过滤和车体排除过滤仍作用于两种消息。
+
+### IMU 发布与调度
+
+IMU 的 SDK 回调只复制数据、确定时间戳并入队，AHRS 计算及 ROS 发布由独立线程
+按 FIFO 顺序执行。队列不保存 SDK 缓冲区指针，也不会在出队时用当前时间重写时间戳。
+`imu_publish_queue_size` 默认 1024；溢出时丢弃最老的数据并输出
+`IMU publisher queue overflow` 告警，而不是无限增加内存。DDS 保持 Reliable，
+兼容现有 `livox_tools` 订阅。
+
+随仓库提供的 `vulcan-mid360s.service` 不再指定 `CPUAffinity=1`，允许驱动、
+发布线程和同一 launch 中的 tools 使用主机允许的 CPU。部署时必须同时更新实际
+使用的 service 文件；仅编译 ROS 包不会更新 systemd 配置。检查
+`systemctl cat vulcan-mid360s.service`，确认其他 drop-in 没有重新限制亲和性。
+
+配合 `autocube_lio/fasterlio2/config/lio.yaml` 中的 `imu_queue_size: 1024` 使用。
+LIO 的 IMU 接收回调使用独立回调组和短锁队列，计算线程在每次运行前按顺序取出
+测量数据，避免接收回调被整帧计算阻塞。队列用于吸收短时抖动，不能解决持续过载。
+本次调整不改变软同步启动时的时间基准切换，也不放宽 LIO 的 `dt > 0.1` 检查。
 
 ## 运行
 
