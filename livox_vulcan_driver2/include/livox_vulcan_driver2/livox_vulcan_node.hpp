@@ -16,8 +16,6 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstddef>
-#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -56,13 +54,6 @@ public:
   ~LivoxVulcanNode();
 
 private:
-  // Own the payload: the SDK reuses/frees its receive buffer after the callback.
-  // Capture the adjusted timestamp at reception, not after time spent in a queue.
-  struct ImuPacket {
-    uint64_t stamp_ns{0};
-    std::vector<LivoxLidarImuRawPoint> points;
-  };
-
   // --- Livox SDK callbacks ---
   static void OnPointCloud(uint32_t handle, const uint8_t dev_type,
                            LivoxLidarEthernetPacket * data, void * client_data);
@@ -77,12 +68,11 @@ private:
   void dispatch_accumulated_frame();
   void pointcloud_publisher_loop();
   void custom_publisher_loop();
-  void imu_publisher_loop();
   void publish_pointcloud_frame(const PointCloudFrame & frame);
   void publish_custom_frame(const PointCloudFrame & frame);
   void start_publisher_threads();
   void stop_publisher_threads();
-  void publish_imu_packet(const ImuPacket & packet);
+  void publish_imu_packet(LivoxLidarEthernetPacket * data);
 
   // Transform a raw point from livox_frame to autocube_link and test whether
   // it falls inside the configured self-exclusion cuboid.
@@ -108,7 +98,6 @@ private:
   std::atomic<bool> publisher_threads_running_{false};
   std::thread pointcloud_publisher_thread_;
   std::thread custom_publisher_thread_;
-  std::thread imu_publisher_thread_;
 
   std::mutex pointcloud_queue_mutex_;
   std::condition_variable pointcloud_queue_cv_;
@@ -118,18 +107,11 @@ private:
   std::condition_variable custom_queue_cv_;
   std::deque<std::shared_ptr<const PointCloudFrame>> custom_queue_;
 
-  // SDK callback only copies/enqueues; AHRS and DDS publishing run in the worker.
-  std::mutex imu_queue_mutex_;
-  std::condition_variable imu_queue_cv_;
-  std::deque<ImuPacket> imu_queue_;
-  size_t imu_publish_queue_size_{1024};
-  uint64_t imu_queue_dropped_{0};  // protected by imu_queue_mutex_
-
   // Config
   std::string config_path_;
   double min_range_{0.0};       // meters; points closer than this are dropped
   float min_range_sq_{0.0f};    // squared threshold in meters, precomputed
-  float intensity_threshold_{7.0f};  // CustomMsg only: drop reflectivity values below this
+  float intensity_threshold_{7.0f};  // drop reflectivity values below this
   std::string cloud_topic_;
   std::string custom_topic_;
   std::string imu_topic_;
