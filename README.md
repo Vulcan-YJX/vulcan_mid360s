@@ -37,7 +37,7 @@ source install/setup.bash
       custom_topic: "livox/custom_msg"
       imu_topic: "livox/imu"
       min_range: 0.3
-      intensity_threshold: 7.0  # 删除 reflectivity/intensity 小于该值的点
+      intensity_threshold: 7.0  # 仅 CustomMsg 删除 reflectivity 小于该值的点
       exclusion_box:
         enabled: true
         front: 0.0    # autocube_link +X，单位 m
@@ -97,10 +97,13 @@ Z: [-bottom, top]
 
 ### 强度过滤
 
-`intensity_threshold` 是 Livox 原始 `reflectivity`（发布到 PointCloud2 时字段名为
-`intensity`）的最小保留阈值，取值范围为 `0–255`，默认值为 `7.0`。驱动在采集阶段
-删除小于该阈值的点，因此过滤同时作用于 `livox/pointcloud` 和
-`livox/custom_msg`；等于阈值的点会保留。设置为 `0.0` 可保留全部强度点。
+`intensity_threshold` 是 Livox 原始 `reflectivity` 的最小保留阈值，取值范围为
+`0–255`，默认值为 `7.0`。该过滤仅在构建 `livox_ros_msg::msg::CustomMsg` 时执行，
+从 `livox/custom_msg` 中删除小于阈值的点；等于阈值的点会保留。设置为 `0.0`
+可关闭 CustomMsg 的强度过滤。
+
+`livox/pointcloud`（`sensor_msgs::msg::PointCloud2`）不受该参数影响，保留所有强度的点，
+其 `intensity` 字段仍为原始 `reflectivity`。距离过滤和车体排除过滤仍作用于两种消息。
 
 ## 运行
 

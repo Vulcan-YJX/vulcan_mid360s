@@ -1,4 +1,6 @@
 ros-humble-ros-base,livox-sdk2,autocube-config,libpcl-dev
+0.0.13
+    use original pointcloud intensity.
 0.0.12
     add intensity_threshold param.
 0.0.11

@@ -100,12 +100,6 @@ void LivoxVulcanNode::OnPointCloud(uint32_t handle, const uint8_t dev_type,
   std::lock_guard<std::mutex> lock(node->cloud_mutex_);
 
   for (uint16_t i = 0; i < data->dot_num; ++i) {
-    // Livox reflectivity is an unsigned 8-bit value. Drop weak returns at the
-    // acquisition stage so they never enter PointCloud2 or CustomMsg.
-    if (static_cast<float>(pts[i].reflectivity) < node->intensity_threshold_) {
-      continue;
-    }
-
     // The raw point is in livox_frame. Filter the robot/body volume after
     // transforming it into autocube_link, before it reaches either publisher.
     if (node->is_inside_exclusion_box(pts[i])) {
@@ -350,6 +344,11 @@ void LivoxVulcanNode::publish_custom_frame(const PointCloudFrame & frame)
   msg->points.reserve(frame.points.size());
   const float filter_sq = min_range_sq_;
   for (const auto & pwt : frame.points) {
+    // Filter weak returns only in CustomMsg; PointCloud2 keeps all intensities.
+    if (static_cast<float>(pwt.point.reflectivity) < intensity_threshold_) {
+      continue;
+    }
+
     const float fx = pwt.point.x * 1e-3f;
     const float fy = pwt.point.y * 1e-3f;
     const float fz = pwt.point.z * 1e-3f;
@@ -675,7 +674,7 @@ LivoxVulcanNode::LivoxVulcanNode(const rclcpp::NodeOptions & options)
   }
   RCLCPP_INFO(
     this->get_logger(),
-    "  Min intensity: %.1f (points below threshold filtered)",
+    "  Min intensity: %.1f (CustomMsg only; points below threshold filtered)",
     intensity_threshold_);
   if (exclusion_box_enabled_) {
     RCLCPP_INFO(
