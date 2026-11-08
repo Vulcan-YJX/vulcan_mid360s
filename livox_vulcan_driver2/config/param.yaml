@@ -15,8 +15,8 @@
       exclusion_box:
         enabled: true
         front: 0.0
-        back: 0.5
+        back: 0.7
         left: 0.15
         right: 0.15
-        top: 0.2
+        top: 0.5
         bottom: 0.2

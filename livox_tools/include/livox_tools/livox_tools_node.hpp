@@ -58,6 +58,7 @@ private:
   std::string base_link_ = "autocube_link";
 
   double min_z_, max_z_;
+  double intensity_threshold_ = 7.0;
   double blind_ = 0.05;
   int num_scans_ = 6;
 

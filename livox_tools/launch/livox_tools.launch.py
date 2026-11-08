@@ -14,6 +14,15 @@ def generate_launch_description():
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
+            name='cubelink_to_base_tf',
+            arguments=[
+                '0.2702366', '0', '0.400146',
+                '0', '0', '0', '1',
+                'base_link', 'autocube_link']
+        ),
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
             name='base_to_livox_tf',
             arguments=[
                 '0', '0', '0',

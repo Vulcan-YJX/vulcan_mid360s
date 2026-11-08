@@ -3,6 +3,9 @@
 
 #include "livox_tools/livox_tools_node.hpp"
 
+#include <cmath>
+#include <stdexcept>
+
 livoxToolsNode::livoxToolsNode(const rclcpp::NodeOptions & options) : Node("livox_tools_node", options), 
   tf_buffer_(this->get_clock()),
   tf_listener_(tf_buffer_)
@@ -14,6 +17,14 @@ livoxToolsNode::livoxToolsNode(const rclcpp::NodeOptions & options) : Node("livo
   this->get_parameter("base_link", base_link_);
   this->get_parameter("min_z", min_z_);
   this->get_parameter("max_z", max_z_);
+  if (!this->has_parameter("intensity_threshold")) {
+    this->declare_parameter<double>("intensity_threshold", intensity_threshold_);
+  }
+  intensity_threshold_ = this->get_parameter("intensity_threshold").as_double();
+  if (!std::isfinite(intensity_threshold_) ||
+      intensity_threshold_ < 0.0 || intensity_threshold_ > 255.0) {
+    throw std::invalid_argument("intensity_threshold must be finite and in [0, 255]");
+  }
   this->get_parameter("enable_log", enable_log_);
   this->get_parameter("range_min", range_min_);
   this->get_parameter("range_max", range_max_);
@@ -147,6 +158,10 @@ std::shared_ptr<sensor_msgs::msg::LaserScan> livoxToolsNode::createLaserScan(
     scan->ranges.resize(num_readings, scan->range_max);
 
     for (const auto &point : filtered_cloud->points) {
+        // Filter only LaserScan candidates; keep the transformed cloud unchanged.
+        if (!std::isfinite(point.intensity) || point.intensity < intensity_threshold_) {
+            continue;
+        }
         double angle = std::atan2(point.y, point.x);
         double range = std::hypot(point.x, point.y);
         if (angle >= scan->angle_min && angle <= scan->angle_max) {
@@ -180,9 +195,26 @@ rcl_interfaces::msg::SetParametersResult livoxToolsNode::parameter_callback(
 {
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
+  // Validate before updating any members so an invalid batch leaves state unchanged.
+  for (const auto & p : parameters) {
+    if (p.get_name() == "intensity_threshold") {
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
+        result.successful = false;
+        result.reason = "intensity_threshold must be a double in [0, 255]";
+        return result;
+      }
+      const double threshold = p.as_double();
+      if (!std::isfinite(threshold) || threshold < 0.0 || threshold > 255.0) {
+        result.successful = false;
+        result.reason = "intensity_threshold must be finite and in [0, 255]";
+        return result;
+      }
+    }
+  }
   for (const auto & p : parameters) {
     if (p.get_name() == "min_z") min_z_ = p.as_double();
     if (p.get_name() == "max_z") max_z_ = p.as_double();
+    if (p.get_name() == "intensity_threshold") intensity_threshold_ = p.as_double();
     if (p.get_name() == "enable_log") enable_log_ = p.as_bool();
   }
   return result;
